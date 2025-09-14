@@ -76,11 +76,11 @@ button {
   padding: 0.625rem 0.875rem;
   font-weight: 700;
   border-radius: 0.75rem;
-  box-shadow: 0 8px 24px rgba(2, 54, 108, 0.12);
+  box-shadow: 0 8px 24px rgba(139, 69, 19, 0.12);
 }
 .btn-primary:hover {
   transform: translateY(-2px);
-  box-shadow: 0 14px 36px rgba(2, 54, 108, 0.16);
+  box-shadow: 0 14px 36px rgba(139, 69, 19, 0.16);
 }
 
 .btn-secondary {
@@ -92,7 +92,7 @@ button {
   border-radius: 0.75rem;
 }
 .btn-secondary:hover {
-  background: #f1f7ff;
+  background: #fdf6f0;
 }
 
 /* Cards */
@@ -107,7 +107,7 @@ button {
 .feature-card:hover,
 .upload-card:hover,
 .field-card:hover {
-  box-shadow: 0 12px 36px rgba(3, 48, 89, 0.06);
+  box-shadow: 0 12px 36px rgba(139, 69, 19, 0.06);
   transform: translateY(-6px);
 }
 
@@ -173,19 +173,19 @@ button {
   font-weight: 700;
 }
 .confidence-bar {
-  background: #e9f4ff;
+  background: #fdf6f0;
   border-radius: 8px;
   height: 12px;
 }
 .confidence-bar > .fill {
-  background: linear-gradient(90deg, #2b9af3, #0065b3);
+  background: linear-gradient(90deg, #d2b48c, #a0522d);
   height: 100%;
 }
 
 /* Chat styling */
 #chatWindow {
   background: #ffffff;
-  border: 1px solid #eef6ff;
+  border: 1px solid #f5f0e8;
   padding: 12px;
   border-radius: 0.75rem;
 }
@@ -197,8 +197,8 @@ button {
   max-width: 88%;
 }
 .chat-bubble.ai {
-  background: #f6fbff;
-  border: 1px solid #e6f3ff;
+  background: #fdf6f0;
+  border: 1px solid #f0e6d2;
   color: var(--text-dark);
 }
 .chat-bubble.user {
@@ -318,7 +318,7 @@ button {
 }
 
 .step-card:hover {
-  background: #e5f2ff; /* Soft light blue on hover */
+  background: #fdf6f0; /* Soft light brown on hover */
   transform: translateY(-10px); /* Slight lifting effect */
   box-shadow: 0 12px 25px rgba(0, 0, 0, 0.15); /* More prominent shadow */
 }
@@ -375,11 +375,11 @@ button {
   background: white;
   border: 1px solid #e2e8f0;
   transition: all 0.3s ease;
-  box-shadow: 0 4px 15px rgba(0, 76, 151, 0.1);
+  box-shadow: 0 4px 15px rgba(139, 69, 19, 0.1);
 }
 
 .upload-card:hover {
-  box-shadow: 0 8px 25px rgba(0, 76, 151, 0.15);
+  box-shadow: 0 8px 25px rgba(139, 69, 19, 0.15);
 }
 
 /* Drop Zone Styles */
@@ -632,19 +632,19 @@ main.analysis-page {
   align-items: center;
   gap: 0.75rem;
   padding: 0.5rem 1rem;
-  background: #f0f9ff;
-  border: 1px solid #bae6fd;
+  background: #fdf6f0;
+  border: 1px solid #e6d3b7;
   border-radius: 9999px;
 }
 
 .confidence-indicator .label {
-  color: #0369a1;
+  color: #8b4513;
   font-size: 0.875rem;
   font-weight: 500;
 }
 
 .confidence-indicator .value {
-  color: #0284c7;
+  color: #a0522d;
   font-size: 1.125rem;
   font-weight: 600;
 }
@@ -827,10 +827,10 @@ main.analysis-page {
 @keyframes glow {
   0%,
   100% {
-    box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+    box-shadow: 0 0 20px rgba(160, 82, 45, 0.3);
   }
   50% {
-    box-shadow: 0 0 30px rgba(59, 130, 246, 0.6);
+    box-shadow: 0 0 30px rgba(160, 82, 45, 0.6);
   }
 }
 
@@ -945,7 +945,7 @@ cument History Improvements */
 }
 
 /* Improved button styling */
-#docHistory a[class*="bg-blue-100"] {
+#docHistory a[class*="bg-amber-100"] {
   font-size: 0.75rem;
   font-weight: 600;
   white-space: nowrap;
@@ -1079,12 +1079,12 @@ Document History Section Improvements */
 }
 
 /* View button styling */
-#docHistory a[class*="bg-blue-100"] {
+#docHistory a[class*="bg-amber-100"] {
   transition: all 0.2s ease;
   font-weight: 600;
 }
 
-#docHistory a[class*="bg-blue-100"]:hover {
+#docHistory a[class*="bg-amber-100"]:hover {
   transform: scale(1.05);
 }
 
@@ -1152,7 +1152,7 @@ Document History Section Improvements */
 
 .quick-replies button:hover {
   transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+  box-shadow: 0 2px 8px rgba(160, 82, 45, 0.3);
 }
 
 /* Chat status indicator */

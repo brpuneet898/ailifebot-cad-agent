@@ -668,6 +668,149 @@ def chat_endpoint(filename):
     # Enhanced fallback response
     return jsonify({'reply': get_intelligent_fallback_response(user_message, document_context)}), 200
 
+@app.route('/extract-bom/<path:filename>', methods=['POST'])
+def extract_bom(filename):
+    """Extract Bill of Materials from the document using AI."""
+    try:
+        logger.info(f"BOM extraction requested for: {filename}")
+        
+        if not model:
+            logger.error("Gemini model not configured for BOM extraction")
+            return jsonify({'error': 'AI model not configured'}), 500
+        
+        safe = secure_filename(filename)
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe)
+        
+        logger.info(f"Looking for file at: {file_path}")
+        
+        if not os.path.exists(file_path):
+            logger.error(f"File not found: {file_path}")
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Create BOM extraction prompt
+        bom_prompt = """
+        Extract a complete Bill of Materials (BOM) from this technical document. 
+
+        For each component/part found, extract the following information:
+        - Part code/number
+        - Description
+        - Wire/cable specifications
+        - From/To connector references
+        - Destination
+        - Drawing reference
+        - Unit of measure
+        - Consumption/Estimated quantity
+
+        Return the data as a JSON array with this structure:
+        {
+            "bom_items": [
+                {
+                    "part_code": "extracted part code",
+                    "description": "component description", 
+                    "wire_spec": "wire/cable specifications",
+                    "connector_ref": "from/to connector info",
+                    "destination": "destination info",
+                    "drawing_ref": "drawing reference",
+                    "unit": "unit of measure",
+                    "quantity": "quantity/consumption"
+                }
+            ]
+        }
+
+        Focus on extracting actual BOM data from tables, lists, or structured content.
+        If no BOM is found, return an empty array.
+        """
+        
+        # Analyze the document for BOM
+        _, ext = os.path.splitext(file_path)
+        
+        if ext.lower() == '.pdf':
+            # Try direct PDF analysis first
+            try:
+                with open(file_path, 'rb') as pdf_file:
+                    pdf_data = pdf_file.read()
+                
+                pdf_part = {
+                    "mime_type": "application/pdf",
+                    "data": pdf_data
+                }
+                
+                response = model.generate_content([bom_prompt, pdf_part])
+                bom_result = parse_bom_response(response.text)
+                
+            except Exception as e:
+                logger.error(f"Direct PDF BOM analysis failed: {e}")
+                # Fallback to image conversion
+                converted_image = convert_pdf_to_image(file_path)
+                if converted_image:
+                    enhanced_image = enhance_image(converted_image)
+                    with safe_image_context(enhanced_image) as img:
+                        response = model.generate_content([bom_prompt, img])
+                        bom_result = parse_bom_response(response.text)
+                    cleanup_temp_files(converted_image, enhanced_image)
+                else:
+                    return jsonify({'error': 'Failed to process PDF for BOM extraction'}), 500
+        else:
+            # Image file
+            enhanced_image = enhance_image(file_path)
+            with safe_image_context(enhanced_image) as img:
+                response = model.generate_content([bom_prompt, img])
+                bom_result = parse_bom_response(response.text)
+            cleanup_temp_files(enhanced_image)
+        
+        bom_items = bom_result.get('bom_items', [])
+        logger.info(f"BOM extraction completed. Found {len(bom_items)} items")
+        
+        return jsonify({
+            'success': True,
+            'bom_items': bom_items,
+            'total_items': len(bom_items)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"BOM extraction failed for {filename}: {e}")
+        return jsonify({'error': f'BOM extraction failed: {str(e)}'}), 500
+
+def parse_bom_response(response_text):
+    """Parse BOM response from Gemini."""
+    try:
+        response_text = response_text.strip()
+        
+        # Remove markdown code blocks
+        if "```json" in response_text:
+            start = response_text.find("```json") + 7
+            end = response_text.find("```", start)
+            if end != -1:
+                response_text = response_text[start:end].strip()
+        
+        # Extract JSON object
+        start_idx = response_text.find('{')
+        end_idx = response_text.rfind('}') + 1
+        
+        if start_idx != -1 and end_idx > start_idx:
+            json_str = response_text[start_idx:end_idx]
+            result = json.loads(json_str)
+            
+            # Validate structure
+            if isinstance(result, dict) and 'bom_items' in result:
+                return result
+        
+        # Fallback: try to find array directly
+        start_idx = response_text.find('[')
+        end_idx = response_text.rfind(']') + 1
+        
+        if start_idx != -1 and end_idx > start_idx:
+            json_str = response_text[start_idx:end_idx]
+            bom_items = json.loads(json_str)
+            return {'bom_items': bom_items}
+        
+        logger.warning("Could not parse BOM JSON, returning empty result")
+        return {'bom_items': []}
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"BOM JSON parsing failed: {e}")
+        return {'bom_items': []}
+
 def load_document_context(analysis_path, filename):
     """Load comprehensive document context for AI chat."""
     context = {
@@ -827,6 +970,15 @@ def get_intelligent_fallback_response(user_message, context):
 def uploaded_file(filename):
     """Serve uploaded files"""
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
+
+@app.route('/test-api')
+def test_api():
+    """Test route to verify API is working"""
+    return jsonify({
+        'status': 'API is working',
+        'model_configured': model is not None,
+        'gemini_key_present': bool(os.environ.get('GEMINI_API_KEY'))
+    })
 
 @app.route("/contact", methods=['GET', 'POST'])
 def contact():
