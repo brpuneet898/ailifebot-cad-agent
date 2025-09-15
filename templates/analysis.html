@@ -288,27 +288,60 @@
             <h2>Bill of Materials</h2>
             <div class="subtitle">Complete BOM extraction</div>
           </header>
-          
+          <div id="bomLiveStatus" class="text-xs text-gray-500 mb-3">
+            Waiting for BOM extraction...
+          </div>
+          <div id="bomResults"></div>
           <div class="bom-section p-6">
-            <div class="mb-4">
-              <button id="extractBomBtn" onclick="extractBOM()" 
-                      class="w-full px-4 py-3 bg-amber-600 hover:bg-amber-700 text-white font-medium rounded-lg transition-colors">
-                <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
-                </svg>
-                Extract Complete BOM
-              </button>
-            </div>
-
-            <div id="bomResults" class="space-y-4">
-              <div class="text-center text-gray-500 py-8">
-                <svg class="w-12 h-12 mx-auto mb-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01"></path>
-                </svg>
-                <p class="text-sm font-medium">Click "Extract Complete BOM" to analyze</p>
-                <p class="text-xs mt-1">Will extract all BOM components from the document</p>
+            {% if analysis.bom_items and analysis.bom_items|length > 0 %}
+              <div class="overflow-x-auto">
+                <table class="min-w-full text-sm border border-gray-300 rounded-lg">
+                  <thead class="bg-amber-100">
+                    <tr>
+                      {% for col in analysis.bom_items[0].keys() %}
+                        <th class="px-3 py-2 border border-gray-300 text-left font-semibold text-gray-800">
+                          {{ col | replace("_", " ") | capitalize }}
+                        </th>
+                      {% endfor %}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {% for row in analysis.bom_items %}
+                      <tr class="hover:bg-amber-50">
+                        {% for val in row.values() %}
+                          <td class="px-3 py-2 border border-gray-300 text-gray-700">{{ val }}</td>
+                        {% endfor %}
+                      </tr>
+                    {% endfor %}
+                  </tbody>
+                </table>
               </div>
-            </div>
+              <div class="mt-4">
+                <button onclick="exportBOM()" 
+                        class="w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors">
+                  Export BOM to CSV
+                </button>
+              </div>
+            {% else %}
+              <div class="mb-4">
+                <button id="extractBomBtn" onclick="extractBOM()" 
+                        class="w-full px-4 py-3 bg-amber-600 hover:bg-amber-700 text-white font-medium rounded-lg transition-colors">
+                  Extract Complete BOM
+                </button>
+              </div>
+
+              {% if analysis.bom_raw %}
+                <div class="bg-gray-50 border border-gray-200 rounded-lg p-4 max-h-72 overflow-y-auto text-left">
+                  <h4 class="text-sm font-semibold text-gray-800 mb-2">Raw BOM Output (Debug)</h4>
+                  <pre class="text-xs text-gray-600 whitespace-pre-wrap">{{ analysis.bom_raw[:1500] }}{% if analysis.bom_raw|length > 1500 %}...{% endif %}</pre>
+                </div>
+              {% else %}
+                <div class="text-center text-gray-500 py-8">
+                  <p class="text-sm font-medium">No BOM detected yet</p>
+                  <p class="text-xs mt-1">Click above to extract BOM</p>
+                </div>
+              {% endif %}
+            {% endif %}
           </div>
         </div>
       </aside>
@@ -642,121 +675,87 @@
       // BOM Extraction functionality
       async function extractBOM() {
         const extractBtn = document.getElementById('extractBomBtn');
+        const statusDiv = document.getElementById('bomLiveStatus');
         const resultsDiv = document.getElementById('bomResults');
-        
-        // Show loading state
+
         extractBtn.disabled = true;
-        extractBtn.innerHTML = `
-          <svg class="w-5 h-5 inline mr-2 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
-          </svg>
-          Extracting BOM...
-        `;
-        
-        try {
-          // Call BOM extraction endpoint
-          const response = await fetch(`/extract-bom/{{ filename }}`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'}
-          });
-          
-          const data = await response.json();
-          
-          if (data.success) {
-            bomData = data.bom_items || [];
-            displayBOMResults(bomData);
-          } else {
-            showBOMError(data.error || 'Failed to extract BOM');
+        statusDiv.innerHTML = "⏳ Extracting BOM...";
+
+        // Start extraction
+        await fetch(`/extract-bom/{{ filename }}`, { method: 'POST' });
+
+        // Poll every 5s for partial CSV updates
+        let interval = setInterval(async () => {
+          try {
+            const response = await fetch(`/uploads/{{ filename }}_bom.csv?ts=${Date.now()}`);
+            if (response.ok) {
+              const text = await response.text();
+              const rows = text.trim().split("\n").map(r => r.split(","));
+              if (rows.length > 1) {
+                const headers = rows[0];
+                const bomItems = rows.slice(1).map(r => {
+                  let obj = {};
+                  headers.forEach((h, i) => obj[h] = r[i]);
+                  return obj;
+                });
+                bomData = bomItems;
+                displayBOMResults(bomData);
+                statusDiv.innerHTML = `⚡ Streaming... ${bomData.length} items so far`;
+              }
+            }
+          } catch (err) {
+            console.log("Polling error:", err);
           }
-          
-        } catch (error) {
-          console.error('BOM extraction error:', error);
-          showBOMError('Network error occurred while extracting BOM');
-        } finally {
-          // Reset button
+        }, 5000);
+
+        // Stop polling when done
+        setTimeout(() => {
+          clearInterval(interval);
+          statusDiv.innerHTML = `✅ Extraction complete! ${bomData.length} items found. <br>
+            <a href="/uploads/{{ filename }}_bom.csv" class="text-blue-600 underline">Download CSV</a>`;
           extractBtn.disabled = false;
-          extractBtn.innerHTML = `
-            <svg class="w-5 h-5 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v10a2 2 0 002 2h8a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"></path>
-            </svg>
-            Extract Complete BOM
-          `;
-        }
+        }, 60000); // give 1 min extraction window
       }
 
       function displayBOMResults(bomItems) {
         const resultsDiv = document.getElementById('bomResults');
-        
+
         if (!bomItems || bomItems.length === 0) {
           resultsDiv.innerHTML = `
             <div class="text-center text-gray-500 py-8">
               <svg class="w-12 h-12 mx-auto mb-3 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
               </svg>
               <p class="text-sm font-medium">No BOM items found</p>
-              <p class="text-xs mt-1">The document may not contain a structured BOM</p>
             </div>
           `;
           return;
         }
 
+        // Build table headers dynamically
+        const headers = Object.keys(bomItems[0]);
         let html = `
-          <div class="space-y-3">
-            <div class="flex items-center justify-between">
-              <h3 class="font-semibold text-gray-900 text-sm">BOM Components</h3>
-              <span class="text-xs text-gray-500">${bomItems.length} items</span>
-            </div>
-        `;
-
-        bomItems.forEach((item, index) => {
-          html += `
-            <div class="bom-item bg-gray-50 rounded-lg p-3 border hover:bg-gray-100 transition-colors">
-              <div class="grid grid-cols-1 gap-2 text-xs">
-                <div class="flex justify-between">
-                  <span class="font-medium text-gray-600">Part Code:</span>
-                  <span class="text-gray-900 font-mono">${item.part_code || '-'}</span>
-                </div>
-                <div class="flex justify-between">
-                  <span class="font-medium text-gray-600">Description:</span>
-                  <span class="text-gray-900">${item.description || '-'}</span>
-                </div>
-                <div class="flex justify-between">
-                  <span class="font-medium text-gray-600">Wire/Cable:</span>
-                  <span class="text-gray-900">${item.wire_spec || '-'}</span>
-                </div>
-                <div class="flex justify-between">
-                  <span class="font-medium text-gray-600">From/To:</span>
-                  <span class="text-gray-900">${item.connector_ref || '-'}</span>
-                </div>
-                <div class="flex justify-between">
-                  <span class="font-medium text-gray-600">Destination:</span>
-                  <span class="text-gray-900">${item.destination || '-'}</span>
-                </div>
-                <div class="flex justify-between">
-                  <span class="font-medium text-gray-600">Drawing Ref:</span>
-                  <span class="text-gray-900">${item.drawing_ref || '-'}</span>
-                </div>
-                <div class="flex justify-between">
-                  <span class="font-medium text-gray-600">Unit:</span>
-                  <span class="text-gray-900">${item.unit || '-'}</span>
-                </div>
-                <div class="flex justify-between">
-                  <span class="font-medium text-gray-600">Quantity:</span>
-                  <span class="text-gray-900 font-semibold">${item.quantity || '-'}</span>
-                </div>
-              </div>
-            </div>
-          `;
-        });
-
-        html += `
+          <div class="overflow-x-auto">
+            <table class="min-w-full text-sm border border-gray-300 rounded-lg">
+              <thead class="bg-amber-100">
+                <tr>
+                  ${headers.map(h => `<th class="px-3 py-2 border border-gray-300 text-left font-semibold text-gray-800">
+                                        ${h.replace(/_/g, ' ').toUpperCase()}
+                                      </th>`).join('')}
+                </tr>
+              </thead>
+              <tbody>
+                ${bomItems.map(row => `
+                  <tr class="hover:bg-amber-50">
+                    ${headers.map(h => `<td class="px-3 py-2 border border-gray-300 text-gray-700">${row[h] || ''}</td>`).join('')}
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
           </div>
-          <div class="mt-4 pt-4 border-t">
+          <div class="mt-4">
             <button onclick="exportBOM()" 
                     class="w-full px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg transition-colors">
-              <svg class="w-4 h-4 inline mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
-              </svg>
               Export BOM to CSV
             </button>
           </div>
@@ -784,23 +783,12 @@
           return;
         }
 
-        // Create CSV content
-        const headers = ['Part Code', 'Description', 'Wire/Cable Spec', 'From/To Connector', 'Destination', 'Drawing Reference', 'Unit of Measure', 'Quantity'];
+        const headers = Object.keys(bomData[0]);
         const csvContent = [
           headers.join(','),
-          ...bomData.map(item => [
-            item.part_code || '',
-            item.description || '',
-            item.wire_spec || '',
-            item.connector_ref || '',
-            item.destination || '',
-            item.drawing_ref || '',
-            item.unit || '',
-            item.quantity || ''
-          ].map(field => `"${field}"`).join(','))
-        ].join('\\n');
+          ...bomData.map(row => headers.map(h => `"${row[h] || ''}"`).join(','))
+        ].join('\n');
 
-        // Download CSV
         const blob = new Blob([csvContent], { type: 'text/csv' });
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');

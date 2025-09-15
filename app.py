@@ -5,7 +5,7 @@ import tempfile
 import logging
 from contextlib import contextmanager
 from typing import Dict, Optional
-
+import pandas as pd
 from flask import Flask, render_template, request, flash, redirect, url_for, jsonify, send_from_directory
 from flask_mail import Mail, Message
 from werkzeug.utils import secure_filename
@@ -49,26 +49,33 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 # Initialize Gemini - optimized for fast CAD analysis
 gemini_api_key = os.environ.get('GEMINI_API_KEY')
-if not gemini_api_key:
-    logger.error("GEMINI_API_KEY not found in environment variables")
-    model = None
-else:
+# Init Gemini models
+if gemini_api_key:
     genai.configure(api_key=gemini_api_key)
-    
-    # Configure generation settings for optimal speed and quality
-    generation_config = genai.types.GenerationConfig(
-        temperature=0.1,  # Lower temperature for more consistent, faster responses
-        top_p=0.8,        # Focused sampling for speed
-        top_k=20,         # Limit token choices for faster generation
-        max_output_tokens=2048,  # Reasonable limit for CAD analysis
-    )
-    
-    # Use Gemini 2.0 Flash for faster processing (2.5 is slower for document analysis)
+
+    # Fast Flash model (keep for fields/metadata)
     model = genai.GenerativeModel(
-        'gemini-2.0-flash',  # Faster than 2.5 for this specific task
-        generation_config=generation_config
+        'gemini-2.0-flash',
+        generation_config=genai.types.GenerationConfig(
+            temperature=0.1,
+            top_p=0.8,
+            top_k=20,
+            max_output_tokens=2048,
+        )
     )
-    logger.info("Gemini 2.0 Flash initialized with speed-optimized settings for CAD analysis")
+
+    # Heavy 2.0 model (for BOM)
+    bom_model = genai.GenerativeModel(
+        'gemini-2.0-flash',   # ✅ or `gemini-2.0-pro` if you need even more quality
+        generation_config=genai.types.GenerationConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+            max_output_tokens=4096,
+        )
+    )
+else:
+    model = None
+    bom_model = None
 
 # Email configuration
 app.config['MAIL_SERVER'] = 'smtp.gmail.com'
@@ -96,6 +103,125 @@ def safe_image_context(image_path):
     finally:
         if img:
             img.close()
+
+def extract_tables_with_pymupdf(pdf_path):
+    """Extract table-like structures using PyMuPDF only (no Poppler)."""
+    tables = []
+    try:
+        doc = fitz.open(pdf_path)
+        for page_num, page in enumerate(doc, start=1):
+            blocks = page.get_text("blocks")
+            rows = []
+            for b in blocks:
+                text = b[4].strip()
+                if not text:
+                    continue
+                # split into columns
+                cols = [c.strip() for c in text.split() if c.strip()]
+                if len(cols) > 1:  # ✅ was > 2
+                    rows.append(cols)
+            if rows:
+                logger.info(f"Page {page_num}: extracted {len(rows)} potential rows")
+                tables.append({"page": page_num, "data": rows})
+        doc.close()
+    except Exception as e:
+        logger.error(f"PyMuPDF table extraction failed: {e}")
+    return tables
+
+def extract_bom_with_tables(file_path, chunk_size=50):
+    if not bom_model:
+        return {'bom_items': []}
+
+    tables = extract_tables_with_pymupdf(file_path)
+    if not tables:
+        return {'bom_items': []}
+
+    all_bom_items = []
+    raw_outputs = []
+
+    for t in tables:
+        rows = t["data"]
+        logger.info(f"Processing page {t['page']} with {len(rows)} rows...")
+
+        # split into chunks
+        for i in range(0, len(rows), chunk_size):
+            chunk = rows[i:i+chunk_size]
+            chunk_text = "\n".join([", ".join(r) for r in chunk])
+
+            prompt = f"""
+            You are a CAD/BOM extraction system.
+            Interpret the following rows and return ONLY valid JSON:
+
+            {{
+              "bom_items": [
+                {{
+                  "part_code": "string",
+                  "description": "string",
+                  "material": "string",
+                  "quantity": "string",
+                  "remarks": "string"
+                }}
+              ]
+            }}
+
+            If not a BOM, return {{"bom_items": []}}.
+
+            Rows (page {t['page']}, chunk {i//chunk_size+1}):
+            {chunk_text}
+            """
+
+            try:
+                response = bom_model.generate_content([prompt])
+
+                # safer response access
+                if hasattr(response, "text") and response.text:
+                    raw_output = response.text
+                elif hasattr(response, "candidates") and response.candidates:
+                    parts = response.candidates[0].content.parts
+                    raw_output = "".join([p.text for p in parts if hasattr(p, "text")])
+                else:
+                    raw_output = ""
+
+                raw_outputs.append(raw_output)
+
+                if not raw_output.strip():
+                    logger.warning(f"BOM chunk {i//chunk_size+1} on page {t['page']} returned empty")
+                    continue
+
+                parsed = parse_bom_response(raw_output)
+                items = parsed.get("bom_items", [])
+                logger.info(f"BOM chunk processed: {len(items)} items")
+                chunk_df = pd.DataFrame(items)
+                if not chunk_df.empty:
+                    out_csv = os.path.join(app.config['UPLOAD_FOLDER'], f"{os.path.basename(file_path)}_bom.csv")
+                    if os.path.exists(out_csv):
+                        chunk_df.to_csv(out_csv, mode='a', header=False, index=False)
+                    else:
+                        chunk_df.to_csv(out_csv, index=False)
+
+                all_bom_items.extend(items)
+
+            except Exception as e:
+                logger.error(f"Gemini BOM extraction failed on chunk {i//chunk_size+1}: {e}")
+
+    return {
+        'bom_items': all_bom_items,
+        'bom_raw': "\n\n---\n\n".join(raw_outputs)
+    }
+
+def parse_bom_response(response_text):
+    try:
+        response_text = response_text.strip()
+        result = json.loads(response_text)
+
+        if isinstance(result, dict) and 'bom_items' in result:
+            return result
+        elif isinstance(result, list):
+            return {'bom_items': result}
+    except Exception as e:
+        logger.error(f"BOM JSON parsing failed: {e} -- raw: {response_text[:200]}")
+
+    return {'bom_items': [], 'bom_raw': response_text}
 
 def convert_pdf_with_pymupdf(pdf_path):
     """Convert PDF using PyMuPDF - much faster and cleaner"""
@@ -435,7 +561,7 @@ def upload_file():
         analysis_result = None
 
         if ext.lower() == '.pdf':
-            # Strategy 1: Try direct PDF analysis (best for Gemini 2.5)
+            # Strategy 1: Try direct PDF analysis (best for Gemini 2.0)
             logger.info('Attempting direct PDF analysis...')
             analysis_result = analyze_with_gemini_direct_pdf(filepath)
 
@@ -539,6 +665,9 @@ def analysis_page(filename):
         logger.error(f"Failed to read analysis artifact: {e}")
         flash('Could not read analysis results.', 'error')
         return redirect(url_for('home'))
+    
+    if "bom_items" not in analysis_artifact:
+        analysis_artifact["bom_items"] = []
 
     # Build document history (list of uploaded files) - newest first
     uploads = []
@@ -670,146 +799,40 @@ def chat_endpoint(filename):
 
 @app.route('/extract-bom/<path:filename>', methods=['POST'])
 def extract_bom(filename):
-    """Extract Bill of Materials from the document using AI."""
-    try:
-        logger.info(f"BOM extraction requested for: {filename}")
-        
-        if not model:
-            logger.error("Gemini model not configured for BOM extraction")
-            return jsonify({'error': 'AI model not configured'}), 500
-        
-        safe = secure_filename(filename)
-        file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe)
-        
-        logger.info(f"Looking for file at: {file_path}")
-        
-        if not os.path.exists(file_path):
-            logger.error(f"File not found: {file_path}")
-            return jsonify({'error': 'File not found'}), 404
-        
-        # Create BOM extraction prompt
-        bom_prompt = """
-        Extract a complete Bill of Materials (BOM) from this technical document. 
+    """Extract BOM from a file using chunked PyMuPDF + Gemini 2.0 approach."""
+    safe = secure_filename(filename)
+    file_path = os.path.join(app.config['UPLOAD_FOLDER'], safe)
+    if not os.path.exists(file_path):
+        return jsonify({'error': 'File not found'}), 404
 
-        For each component/part found, extract the following information:
-        - Part code/number
-        - Description
-        - Wire/cable specifications
-        - From/To connector references
-        - Destination
-        - Drawing reference
-        - Unit of measure
-        - Consumption/Estimated quantity
+    # Run hybrid BOM extraction (chunked)
+    bom_result = extract_bom_with_tables(file_path)
 
-        Return the data as a JSON array with this structure:
-        {
-            "bom_items": [
-                {
-                    "part_code": "extracted part code",
-                    "description": "component description", 
-                    "wire_spec": "wire/cable specifications",
-                    "connector_ref": "from/to connector info",
-                    "destination": "destination info",
-                    "drawing_ref": "drawing reference",
-                    "unit": "unit of measure",
-                    "quantity": "quantity/consumption"
-                }
-            ]
-        }
+    # --- persist into analysis JSON ---
+    analysis_filename = f"{safe}.analysis.json"
+    analysis_path = os.path.join(app.config['UPLOAD_FOLDER'], analysis_filename)
 
-        Focus on extracting actual BOM data from tables, lists, or structured content.
-        If no BOM is found, return an empty array.
-        """
-        
-        # Analyze the document for BOM
-        _, ext = os.path.splitext(file_path)
-        
-        if ext.lower() == '.pdf':
-            # Try direct PDF analysis first
-            try:
-                with open(file_path, 'rb') as pdf_file:
-                    pdf_data = pdf_file.read()
-                
-                pdf_part = {
-                    "mime_type": "application/pdf",
-                    "data": pdf_data
-                }
-                
-                response = model.generate_content([bom_prompt, pdf_part])
-                bom_result = parse_bom_response(response.text)
-                
-            except Exception as e:
-                logger.error(f"Direct PDF BOM analysis failed: {e}")
-                # Fallback to image conversion
-                converted_image = convert_pdf_to_image(file_path)
-                if converted_image:
-                    enhanced_image = enhance_image(converted_image)
-                    with safe_image_context(enhanced_image) as img:
-                        response = model.generate_content([bom_prompt, img])
-                        bom_result = parse_bom_response(response.text)
-                    cleanup_temp_files(converted_image, enhanced_image)
-                else:
-                    return jsonify({'error': 'Failed to process PDF for BOM extraction'}), 500
-        else:
-            # Image file
-            enhanced_image = enhance_image(file_path)
-            with safe_image_context(enhanced_image) as img:
-                response = model.generate_content([bom_prompt, img])
-                bom_result = parse_bom_response(response.text)
-            cleanup_temp_files(enhanced_image)
-        
-        bom_items = bom_result.get('bom_items', [])
-        logger.info(f"BOM extraction completed. Found {len(bom_items)} items")
-        
-        return jsonify({
-            'success': True,
-            'bom_items': bom_items,
-            'total_items': len(bom_items)
-        }), 200
-        
-    except Exception as e:
-        logger.error(f"BOM extraction failed for {filename}: {e}")
-        return jsonify({'error': f'BOM extraction failed: {str(e)}'}), 500
+    if os.path.exists(analysis_path):
+        with open(analysis_path, 'r', encoding='utf-8') as f:
+            analysis_artifact = json.load(f)
+    else:
+        analysis_artifact = {}
 
-def parse_bom_response(response_text):
-    """Parse BOM response from Gemini."""
-    try:
-        response_text = response_text.strip()
-        
-        # Remove markdown code blocks
-        if "```json" in response_text:
-            start = response_text.find("```json") + 7
-            end = response_text.find("```", start)
-            if end != -1:
-                response_text = response_text[start:end].strip()
-        
-        # Extract JSON object
-        start_idx = response_text.find('{')
-        end_idx = response_text.rfind('}') + 1
-        
-        if start_idx != -1 and end_idx > start_idx:
-            json_str = response_text[start_idx:end_idx]
-            result = json.loads(json_str)
-            
-            # Validate structure
-            if isinstance(result, dict) and 'bom_items' in result:
-                return result
-        
-        # Fallback: try to find array directly
-        start_idx = response_text.find('[')
-        end_idx = response_text.rfind(']') + 1
-        
-        if start_idx != -1 and end_idx > start_idx:
-            json_str = response_text[start_idx:end_idx]
-            bom_items = json.loads(json_str)
-            return {'bom_items': bom_items}
-        
-        logger.warning("Could not parse BOM JSON, returning empty result")
-        return {'bom_items': []}
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"BOM JSON parsing failed: {e}")
-        return {'bom_items': []}
+    # ✅ merge instead of overwrite
+    analysis_artifact.setdefault("fields", [])
+    analysis_artifact.setdefault("metadata", {})
+    analysis_artifact["bom_items"] = bom_result.get("bom_items", [])
+    analysis_artifact["bom_raw"] = bom_result.get("bom_raw", "")
+
+    with open(analysis_path, 'w', encoding='utf-8') as f:
+        json.dump(analysis_artifact, f, indent=2)
+
+    return jsonify({
+        'success': True,
+        'bom_items': analysis_artifact["bom_items"],
+        'total_items': len(analysis_artifact["bom_items"]),
+        'raw_preview': analysis_artifact.get("bom_raw", "")[:500]  # ✅ show first 500 chars for debug
+    }), 200
 
 def load_document_context(analysis_path, filename):
     """Load comprehensive document context for AI chat."""
