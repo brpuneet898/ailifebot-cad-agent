@@ -3,6 +3,7 @@ import json
 import time
 import tempfile
 import logging
+import re
 from contextlib import contextmanager
 from typing import Dict, Optional
 import pandas as pd
@@ -159,10 +160,21 @@ def extract_bom_with_tables(file_path, chunk_size=50):
                   "description": "string",
                   "material": "string",
                   "quantity": "string",
+                  "unit_price": "string",
+                  "total_price": "string",
                   "remarks": "string"
                 }}
               ]
             }}
+
+            IMPORTANT INSTRUCTIONS:
+            - Look for quantity information in ANY column (numbers like 1, 2, 10, etc.)
+            - If no explicit quantity column exists, extract quantities from part codes, descriptions, or other fields
+            - Look for patterns like "N.4", "QTY: 2", "x3", "2pcs", etc.
+            - If no quantity is found, use "1" as default
+            - Extract unit prices if available (look for currency symbols, decimal numbers)
+            - Calculate total_price = quantity × unit_price when possible
+            - Be thorough in extracting part codes and descriptions
 
             If not a BOM, return {{"bom_items": []}}.
 
@@ -215,6 +227,18 @@ def parse_bom_response(response_text):
         result = json.loads(response_text)
 
         if isinstance(result, dict) and 'bom_items' in result:
+            # Post-process to ensure quantity is always present and numeric when possible
+            for item in result['bom_items']:
+                if 'quantity' not in item or not item['quantity'] or item['quantity'].strip() == '':
+                    # Try to extract quantity from part_code or description
+                    quantity = extract_quantity_from_text(item.get('part_code', '') + ' ' + item.get('description', ''))
+                    item['quantity'] = quantity if quantity else '1'
+                
+                # Ensure all required fields exist
+                item.setdefault('unit_price', '')
+                item.setdefault('total_price', '')
+                item.setdefault('remarks', item.get('remarks', ''))
+            
             return result
         elif isinstance(result, list):
             return {'bom_items': result}
@@ -222,6 +246,32 @@ def parse_bom_response(response_text):
         logger.error(f"BOM JSON parsing failed: {e} -- raw: {response_text[:200]}")
 
     return {'bom_items': [], 'bom_raw': response_text}
+
+def extract_quantity_from_text(text):
+    """Extract quantity from text using regex patterns"""
+    import re
+    
+    if not text:
+        return None
+    
+    # Common quantity patterns
+    patterns = [
+        r'N\.(\d+)',           # N.4
+        r'QTY[:\s]*(\d+)',     # QTY: 2, QTY 3
+        r'x(\d+)',             # x3
+        r'(\d+)pcs',           # 2pcs
+        r'(\d+)\s*pieces',     # 3 pieces
+        r'(\d+)\s*units',      # 5 units
+        r'^(\d+)$',            # Just a number
+        r'(\d+)\s*ea',         # 2 ea (each)
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    
+    return None
 
 def convert_pdf_with_pymupdf(pdf_path):
     """Convert PDF using PyMuPDF - much faster and cleaner"""
